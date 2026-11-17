@@ -139,6 +139,42 @@ REASONS = {
     "X_EMPTY_SELECTION": _r(
         "X_EMPTY_SELECTION", WARN, "export",
         "导出选择为空", "先跑一次采信再导出"),
+    # ---- M8 行级补正 ----
+    "R_TARGET_NOT_FOUND": _r(
+        "R_TARGET_NOT_FOUND", ERROR, "correction",
+        "补正目标行号在该批次证据里不存在", "核对 row_ref 的文件名与行号"),
+    "R_TARGET_NOT_QUARANTINE": _r(
+        "R_TARGET_NOT_QUARANTINE", ERROR, "correction",
+        "目标行不在隔离区（已采信记录不允许补正改写）",
+        "补正只面向隔离坏行；已采信行的修正走下一版本事件"),
+    "R_CONTRACT_FAILED": _r(
+        "R_CONTRACT_FAILED", ERROR, "correction",
+        "补正事件未通过同一套契约校验", "按返回的契约错误码修正后重试同一补正单"),
+    "R_IDENTITY_MISMATCH": _r(
+        "R_IDENTITY_MISMATCH", ERROR, "correction",
+        "补正事件的表/主键/版本与目标坏行不一致", "补正只能改内容，不能换身份或跳版本"),
+    "R_DUPLICATE_BUSINESS_KEY": _r(
+        "R_DUPLICATE_BUSINESS_KEY", ERROR, "correction",
+        "补正事件与已采信事件同键同版本同签名，无需补正",
+        "该值已在正式结果中，不要再补"),
+    "R_REVISION_FAILED": _r(
+        "R_REVISION_FAILED", ERROR, "correction",
+        "新快照修订版发布失败，已整体回滚，正式快照仍是上一有效版",
+        "修正后用同一补正单重试，不会产生新单"),
+    "R_APPLIED": _r(
+        "R_APPLIED", INFO, "correction",
+        "补正已应用并发布新的正式快照修订版", "正式快照默认读最新有效修订版"),
+    "R_REJECTED": _r(
+        "R_REJECTED", WARN, "correction",
+        "补正未通过校验，已留失败记录，未改动任何已采信结果",
+        "按原因码修正后用同一补正单重试"),
+    "R_IDEMPOTENT_RETRY": _r(
+        "R_IDEMPOTENT_RETRY", INFO, "correction",
+        "同一补正键重发：命中既有补正单，不新增、不重复计数",
+        "成功单返回修订版，失败单保持失败留痕"),
+    "R_SUPERSEDED": _r(
+        "R_SUPERSEDED", INFO, "correction",
+        "同一目标行的旧补正已被新补正取代", "以最新补正单的修订版为准"),
 }
 
 

@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h1>补正核对</h1>
+    <p class="panel-sub">
+      正式快照修订版 r{{ effective.revision_no }} ·
+      补正单 {{ corrections | length }} 张 ·
+      生效 {{ effective.corrections_applied | default(0) }} 张
+    </p>
+  </div>
+  <div class="panel-body">
+    <p class="hint">
+      裁决：补正<b>独立成单、只追加</b>，原批次证据（事件/快照/清单）一字不改；
+      补正成功在同一事务发布新的不可变正式快照修订版，失败回滚且上一版继续可用；
+      同一补正键重发命中同一张单，不新增、不重复。
+    </p>
+    <div class="actions">
+      <a class="btn" href="/api/export/corrections.csv">导出补正单 CSV</a>
+      <a class="btn" href="/api/export/effective-snapshot.csv">导出正式快照 CSV</a>
+      <a class="btn btn-ghost" href="/conflicts">回隔离区选坏行</a>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>提交补正单</h2>
+    <p class="panel-sub">只接受隔离区坏行；身份（表/主键/版本）必须与目标行一致</p>
+  </div>
+  <div class="panel-body">
+    <div class="table-wrap" style="max-width:760px">
+      <table class="grid">
+        <tbody>
+          <tr>
+            <th>目标行号 row_ref</th>
+            <td><input id="corr-target" style="width:100%" placeholder="例如 events_main.jsonl:23"></td>
+          </tr>
+          <tr>
+            <th>操作人 / 事由</th>
+            <td>
+              <input id="corr-operator" placeholder="操作人" style="width:30%">
+              <input id="corr-reason" placeholder="补正事由（留痕）" style="width:60%">
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <textarea id="corr-event" spellcheck="false" style="min-height:170px"
+      placeholder='完整修正事件，例如：&#10;{"table":"products","pk":"6001","version":1,"op":"upsert","event_time":"2026-11-15T08:31:00Z","schema":"v2","payload":{"status":"在售","amount":"88.00"}}'></textarea>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn btn-primary" id="btn-correction" type="button">提交补正</button>
+      <span class="hint" id="corr-hint">同键重发幂等：返回同一张单，不新增修订版</span>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>正式快照修订版链</h2>
+    <p class="panel-sub">{{ revisions | length }} 个修订版 · 全部不可变，当前正式版为最新 active</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th class="num">修订版</th><th>修订版 ID</th><th>状态</th><th>来源补正单</th>
+        <th class="num">行数</th><th>快照金额</th><th>as_of (UTC)</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr class="is-dim">
+            <td class="num">0</td><td class="mono">基线（原批次快照，冻结）</td>
+            <td><span class="state state-active">active</span></td>
+            <td>—</td>
+            <td class="num">{{ batch.batch_id if batch else '' }}</td>
+            <td class="num">—</td>
+            <td class="mono nowrap">{{ batch.watermark_utc | localdt if batch else '—' }}</td>
+            <td>原批次证据，永不改写</td>
+          </tr>
+          {% for rev in revisions %}
+          <tr>
+            <td class="num">r{{ rev.revision_no }}</td>
+            <td class="mono">{{ rev.revision_id }}</td>
+            <td><span class="state state-{{ 'ok' if rev.status == 'active' else 'bad' }}">{{ rev.status }}</span></td>
+            <td class="mono"><a href="/api/corrections/{{ rev.base_of_correction }}">{{ rev.base_of_correction }}</a></td>
+            <td class="num">{{ rev.row_count | num }}</td>
+            <td class="num">{{ rev.amount_snapshot | dec }}</td>
+            <td class="mono nowrap">{{ rev.as_of_utc | localdt }}</td>
+            <td class="ellipsis" title="{{ rev.note }}">{{ rev.note }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not revisions %}<p class="empty">还没有修订版，正式快照等于原批次基线。</p>{% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>补正账</h2>
+    <p class="panel-sub">{{ reconcile | length }} 条身份</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th>账</th><th>左</th><th class="num">值</th><th>右</th><th class="num">值</th><th>结论</th></tr></thead>
+        <tbody>
+          {% for row in reconcile %}
+          <tr>
+            <td>{{ row.name }}</td>
+            <td>{{ row.left }}</td>
+            <td class="num">{{ row.left_value | num if row.kind == 'count' else (row.left_value | dec) }}</td>
+            <td>{{ row.right }}</td>
+            <td class="num">{{ row.right_value | num if row.kind == 'count' else (row.right_value | dec) }}</td>
+            <td><span class="balance {% if not row.ok %}is-bad{% endif %}">{{ "平" if row.ok else "不平" }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not reconcile %}<p class="empty">暂无补正，补正账在首张补正单生效后出现。</p>{% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>补正单（含失败留痕）</h2>
+    <p class="panel-sub">{{ corrections | length }} 张 · 点击单号查看原行证据与正式值双向追溯</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid" data-sortable>
+        <thead><tr><th>补正单号</th><th>目标行号</th><th>状态</th><th>原因码</th>
+        <th class="num">修订版</th><th>取代</th><th>操作人</th><th>明细</th><th>提交时间</th></tr></thead>
+        <tbody>
+          {% for c in corrections %}
+          <tr>
+            <td class="mono nowrap"><a href="/api/corrections/{{ c.correction_id }}">{{ c.correction_id }}</a></td>
+            <td class="mono nowrap"><a href="/api/trace/row/{{ c.target_ref }}">{{ c.target_ref }}</a></td>
+            <td><span class="state state-{{ 'ok' if c.status == 'applied' else 'bad' }}">{{ correction_status_labels.get(c.status, c.status) }}</span></td>
+            <td class="nowrap">{% if c.reason_code %}<code class="code is-{{ c.reason_code | level }}">{{ c.reason_code }}</code>{% else %}—{% endif %}</td>
+            <td class="num">{{ c.revision_no if c.revision_no is not none else '—' }}</td>
+            <td class="mono">{{ c.supersedes_id or '—' }}</td>
+            <td>{{ c.operator or '—' }}</td>
+            <td class="ellipsis" title="{{ c.detail }}">{{ c.detail or '—' }}</td>
+            <td class="mono nowrap">{{ c.created_at | localdt }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not corrections %}<p class="empty">还没有补正单。</p>{% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>正式快照（当前有效修订版 r{{ effective.revision_no }}）</h2>
+    <p class="panel-sub">{{ effective.rows | length }} 行 · 补正来源行带补正单号与目标行号</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid" data-sortable>
+        <thead><tr><th>表</th><th>主键</th><th class="num">版本</th><th>状态</th>
+        <th class="num">金额(元)</th><th>事件时间</th><th>行号引用</th><th>来源</th><th>追溯</th></tr></thead>
+        <tbody>
+          {% for row in effective.rows %}
+          <tr>
+            <td>{{ row.table }}</td>
+            <td class="mono">{{ row.pk }}</td>
+            <td class="num">{{ row.version }}</td>
+            <td><span class="state state-{{ 'tombstone' if row.op == 'delete' else 'active' }}">{{ "墓碑" if row.op == "delete" else "活跃" }}</span></td>
+            <td class="num">{{ row.amount | dec }}</td>
+            <td class="mono nowrap">{{ row.event_time_utc | localdt }}</td>
+            <td class="mono nowrap">{{ row.row_ref }}</td>
+            <td>{% if row.source_kind == 'correction' %}<span class="state state-warn">补正</span>{% else %}原批次{% endif %}</td>
+            <td class="mono nowrap">
+              {% if row.correction_id %}<a href="/api/corrections/{{ row.correction_id }}">{{ row.correction_id }}</a>
+              <br><a href="/api/trace/row/{{ row.target_ref }}">原行 {{ row.target_ref }}</a>{% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>逐键金额差额</h2>
+    <p class="panel-sub">基线 → 当前正式版，每个被补正改动的键一行</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th>键</th><th class="num">基线金额</th><th class="num">正式金额</th><th class="num">差额</th></tr></thead>
+        <tbody>
+          {% for d in deltas %}
+          <tr>
+            <td class="mono">{{ d.key }}</td>
+            <td class="num">{{ d.amount_before | dec }}</td>
+            <td class="num">{{ d.amount_after | dec }}</td>
+            <td class="num">{{ d.delta | dec }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not deltas %}<p class="empty">没有金额变化。</p>{% endif %}
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>可补正的隔离坏行</h2>
+    <p class="panel-sub">{{ quarantine | length }} 行 · 点「填入」把 row_ref 带入表单</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th>行号引用</th><th>表</th><th>主键</th><th class="num">版本</th><th>原因码</th><th>明细</th><th></th></tr></thead>
+        <tbody>
+          {% for q in quarantine %}
+          <tr>
+            <td class="mono nowrap">{{ q.row_ref }}</td>
+            <td>{{ q.table or '—' }}</td>
+            <td class="mono">{{ q.pk or '—' }}</td>
+            <td class="num">{{ q.version if q.version is not none else '—' }}</td>
+            <td class="nowrap"><code class="code is-error">{{ q.reason_code }}</code></td>
+            <td class="ellipsis" title="{{ q.detail }}">{{ q.detail }}</td>
+            <td><button class="btn btn-ghost btn-pick" type="button" data-ref="{{ q.row_ref }}">填入</button></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if not quarantine %}<p class="empty">没有隔离行。</p>{% endif %}
+  </div>
+</section>
+{% endblock %}

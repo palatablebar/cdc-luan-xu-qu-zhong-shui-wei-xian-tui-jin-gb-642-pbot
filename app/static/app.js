@@ -112,6 +112,47 @@
       return;
     }
 
+    if (target.id === "btn-correction") {
+      var targetRef = document.getElementById("corr-target");
+      var eventBox = document.getElementById("corr-event");
+      var operator = document.getElementById("corr-operator");
+      var reason = document.getElementById("corr-reason");
+      var eventPayload;
+      try {
+        eventPayload = JSON.parse(eventBox.value);
+      } catch (err) {
+        toast("补正事件 JSON 解析失败", true);
+        return;
+      }
+      busy(target, true);
+      request("/api/corrections", {
+        target_ref: targetRef.value,
+        event: eventPayload,
+        operator: operator ? operator.value : "",
+        reason: reason ? reason.value : ""
+      }).then(function (data) {
+        if (data.idempotent_retry) {
+          toast("命中既有补正单 " + data.correction.correction_id + "，未新增");
+        } else {
+          toast("补正已生效 · 修订版 r" + data.revision.revision_no);
+        }
+        window.setTimeout(function () { window.location.reload(); }, 900);
+      }).catch(function (err) {
+        toast(err.message, true);
+        busy(target, false);
+      });
+      return;
+    }
+
+    if (target.classList.contains("btn-pick")) {
+      var refBox = document.getElementById("corr-target");
+      if (refBox) {
+        refBox.value = target.getAttribute("data-ref");
+        refBox.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      return;
+    }
+
     if (target.id === "btn-preview") {
       var input = document.getElementById("preview-input");
       var state = document.getElementById("preview-state");

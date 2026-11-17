@@ -26,6 +26,7 @@ NAV = (
     ("/conflicts", "冲突隔离", "conflicts"),
     ("/snapshot", "快照", "snapshot"),
     ("/batches", "批次", "batches"),
+    ("/corrections", "补正核对", "corrections"),
 )
 
 ROW_CLASS_LABELS = {
@@ -36,6 +37,7 @@ ROW_CLASS_LABELS = {
 }
 SNAPSHOT_LABELS = {"active": "活跃", "tombstone": "墓碑", "pending": "待定"}
 STATUS_LABELS = {"done": "完成", "failed": "失败", "running": "运行中", "stale": "已拒绝"}
+CORRECTION_STATUS_LABELS = {"applied": "已应用", "failed": "已拒绝（留痕）"}
 
 
 @dataclass
@@ -96,6 +98,7 @@ def setup(app) -> None:
         aliases=config.ALIASES,
         source_labels=config.SOURCE_LABELS,
         source_keys=("all", "main", "v1_csv", "late"),
+        correction_status_labels=CORRECTION_STATUS_LABELS,
         money_unit=config.MONEY_UNIT,
         window_note=config.WINDOW_NOTE,
         late_window=config.LATE_WINDOW_MINUTES,

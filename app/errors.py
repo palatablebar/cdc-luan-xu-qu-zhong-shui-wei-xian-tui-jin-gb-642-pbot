@@ -37,6 +37,22 @@ class StaleBatch(Conflict):
     code = "C_STALE_BATCH"
 
 
+class CorrectionRejected(Conflict):
+    """补正未通过规则：失败留痕在 corrections 表，正式快照不动。"""
+
+    code = "R_REJECTED"
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 detail: dict | None = None, correction_id: str | None = None):
+        super().__init__(message, code=code, detail=detail)
+        self.correction_id = correction_id
+
+    def payload(self) -> dict:
+        data = super().payload()
+        data["detail"]["correction_id"] = self.correction_id
+        return data
+
+
 def install_handlers(app) -> None:
     from fastapi import Request
     from fastapi.responses import JSONResponse

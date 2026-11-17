@@ -3,7 +3,7 @@
 <section class="panel">
   <div class="panel-head">
     <h1>快照</h1>
-    <p class="panel-sub">as_of {{ summary.as_of | localdt }} · {{ summary.snapshot_keys | num }} 键</p>
+    <p class="panel-sub">as_of {{ summary.as_of | localdt }} · {{ summary.snapshot_keys | num }} 键（本页为原批次基线快照，冻结不可变）</p>
   </div>
   <div class="panel-body">
     <div class="actions">
@@ -12,8 +12,44 @@
       <a class="btn" href="/api/export/snapshot.json">导出 JSON</a>
       <span class="hint" id="snapshot-hint">同一 as_of 重算行数不变</span>
     </div>
+    {% if latest_rev %}
+    <div class="hint is-bad" style="margin-top:8px">
+      存在补正后的正式快照：当前有效修订版
+      <a href="/corrections"><b>r{{ latest_rev.revision_no }}（{{ latest_rev.revision_id }}）</b></a>
+      · 基线快照保持原样，业务取值以正式修订版为准。
+    </div>
+    {% endif %}
   </div>
 </section>
+
+{% if revisions %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>正式快照修订版（补正后）</h2>
+    <p class="panel-sub">{{ revisions | length }} 个不可变修订版</p>
+  </div>
+  <div class="panel-body tight">
+    <div class="table-wrap">
+      <table class="grid">
+        <thead><tr><th class="num">修订版</th><th>修订版 ID</th><th class="num">行数</th>
+        <th class="num">快照金额</th><th>来源补正单</th><th>说明</th></tr></thead>
+        <tbody>
+          {% for rev in revisions %}
+          <tr>
+            <td class="num">r{{ rev.revision_no }}</td>
+            <td class="mono">{{ rev.revision_id }}</td>
+            <td class="num">{{ rev.row_count | num }}</td>
+            <td class="num">{{ rev.amount_snapshot | dec }}</td>
+            <td class="mono"><a href="/api/corrections/{{ rev.base_of_correction }}">{{ rev.base_of_correction }}</a></td>
+            <td class="ellipsis" title="{{ rev.note }}">{{ rev.note }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
 
 <div class="split">
   <aside class="rail" aria-label="快照计数">

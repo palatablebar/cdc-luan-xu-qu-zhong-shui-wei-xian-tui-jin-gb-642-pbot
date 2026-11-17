@@ -52,6 +52,8 @@ def page_snapshot(request: Request, ctx: Ctx = Depends(get_ctx)):
         "stages": [], "totals": {}}
     summary = (service.summarize(ctx.store, batch["batch_id"]) if batch
                else service.blank_summary())
+    revisions = (ctx.store.list_revisions(batch["batch_id"]) if batch else [])
+    latest_rev = revisions[-1] if revisions else None
     return render(request, "snapshot.html", batch=batch, page="snapshot",
                   summary=summary,
                   rows=service.page_rows(ctx.store, batch["batch_id"])[:300]
@@ -61,6 +63,7 @@ def page_snapshot(request: Request, ctx: Ctx = Depends(get_ctx)):
                   reconcile=service.reconcile_rows(ctx.store, batch["batch_id"])
                   if batch else [],
                   window_rows=service.window_rows(),
+                  revisions=revisions, latest_rev=latest_rev,
                   totals=layers["totals"], inputs=layers["inputs"],
                   page_title="快照")
 

@@ -83,7 +83,7 @@
   <div class="panel-body tight">
     <div class="table-wrap">
       <table class="grid" data-sortable>
-        <thead><tr><th>行号引用</th><th>表</th><th>主键</th><th>字段</th><th>原值</th><th>原因码</th><th>明细</th></tr></thead>
+        <thead><tr><th>行号引用</th><th>表</th><th>主键</th><th>字段</th><th>原值</th><th>原因码</th><th>明细</th><th>补正</th></tr></thead>
         <tbody>
           {% for row in quarantine %}
           <tr>
@@ -94,6 +94,10 @@
             <td class="mono ellipsis" title="{{ row.raw_value }}">{{ row.raw_value or '—' }}</td>
             <td class="nowrap"><code class="code is-{{ row.reason_code | level }}">{{ row.reason_code }}</code></td>
             <td class="ellipsis" title="{{ row.detail }}">{{ row.detail or '—' }}</td>
+            <td class="nowrap">
+              <a class="btn btn-ghost" href="/corrections">去补正</a>
+              <a class="btn btn-ghost" href="/api/trace/row/{{ row.row_ref }}">追溯</a>
+            </td>
           </tr>
           {% endfor %}
         </tbody>

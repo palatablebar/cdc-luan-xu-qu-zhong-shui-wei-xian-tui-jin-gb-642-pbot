@@ -16,7 +16,10 @@
 - 水位线 = 已应用事件最大 `event_time` − 10 分钟，严格小于才记迟到，迟到**仍然应用**；
 - 快照按 `event_time ≤ as_of` 物化，`as_of` 之后的事件留待定窗口，一并给出合计；
 - 批次键 = 输入摘要 + 规则版本 + 参数，同一输入重跑命中批次、不新增行；
-- 导出事件证据、隔离区、冲突表、快照 CSV/JSON 与运行清单（含 `run_id` 与每个输入的 sha256）。
+- 行级补正独立成单、只追加：原批次证据一字不改，补正在同事务发布不可变的正式快照
+  修订版；失败回滚留旧版，同一补正键重试不新增、不重复，页面/快照/原行三向可追溯；
+- 导出事件证据、隔离区、冲突表、快照 CSV/JSON、补正单、正式快照与运行清单
+  （含 `run_id` 与每个输入的 sha256）。
 
 ## 功能模块
 
@@ -29,6 +32,7 @@
 | M5 快照物化 | 按水位物化快照，看待定键 | `POST /api/snapshot`、页面 `/snapshot` | `apply.py` `materialize.py` |
 | M6 批次续跑 | 查历史、看清单、续跑与重跑 | `GET /api/batches`、页面 `/batches` | `state.py` `resume.py` `history.py` |
 | M7 审计导出 | 下载证据行、隔离、冲突、快照与清单 | `GET /api/export/*` | `csv_out.py` `json_out.py` `manifest_out.py` |
+| M8 行级补正 | 隔离坏行补正、看修订版链与双向追溯 | `POST /api/corrections`、页面 `/corrections` | `rules.py` `revision.py` `service.py` |
 
 模块内统一是 `handler.py`（入口）+ `service.py`（编排）+ 两个纯规则/读写文件；
 定义写在 `docs/DATA-DICTIONARY.md`，坑与测试映射写在 `docs/DEPTH.md`。
@@ -39,7 +43,8 @@
 2. **冲突不猜**：同键同版本两种内容 → 整组不应用；删除后到达的低版本 upsert 不复活；
 3. **水位单调**：`max(event_time) − 10min`，只由已应用事件推进，迟到只标记不丢弃；
 4. **快照半开**：`[-, as_of]` 进快照、`(as_of, +inf)` 待定，两窗口不重叠；
-5. **金额 Decimal**：`0.01` 量化、`ROUND_HALF_UP`，合计可独立复算。
+5. **金额 Decimal**：`0.01` 量化、`ROUND_HALF_UP`，合计可独立复算；
+6. **补正只追加**：原批次表永不改写；补正单与正式快照修订版只追加，同补正键重发幂等。
 
 ## 启动
 
@@ -58,7 +63,8 @@ docker compose down -v             # 连数据库卷一起删
 2. `/events` 按分类筛选，看每行的行号引用与原因码；
 3. `/conflicts` 看冲突分组、隔离区与优先级表，导出隔离 CSV；
 4. `/snapshot` 点「物化」，看活跃 / 墓碑 / 待定与三条对账；
-5. `/batches` 看 `run_id`、输入 sha256、阶段耗时，导出运行清单。
+5. `/batches` 看 `run_id`、输入 sha256、阶段耗时，导出运行清单；
+6. `/corrections` 对隔离坏行提交补正，看修订版链、补正账与正式快照，单号与行号双向可追溯。
 
 ## API 与页面
 
@@ -74,10 +80,15 @@ docker compose down -v             # 连数据库卷一起删
 | GET | `/api/snapshot` / POST `/api/snapshot` | 读快照 / 重新物化 |
 | GET | `/api/batches`、`/api/batches/{id}`、`/api/batches/{id}/manifest` | 批次与清单 |
 | POST | `/api/batches/{id}/resume` | 续跑 |
-| GET | `/api/export/{events,quarantine,conflicts,snapshot}.csv` | 证据导出 |
+| GET | `/api/export/{events,quarantine,conflicts,snapshot}.csv` | 证据导出（原批次冻结基线） |
 | GET | `/api/export/{snapshot,manifest}.json` | 快照与运行清单 |
+| POST | `/api/corrections` | 提交行级补正（`target_ref` + 完整修正事件） |
+| GET | `/api/corrections`、`/api/corrections/{id}` | 补正单列表 / 反向追溯 |
+| GET | `/api/trace/row/{row_ref}` | 原行 → 补正链 → 正式值正向追溯 |
+| GET | `/api/effective-snapshot` | 正式快照（最新有效修订版，可指定 `revision`） |
+| GET | `/api/export/{corrections,effective-snapshot}.csv` | 补正单与正式快照导出 |
 
-页面共 6 个：`/`、`/events`、`/schema`、`/conflicts`、`/snapshot`、`/batches`。
+页面共 7 个：`/`、`/events`、`/schema`、`/conflicts`、`/snapshot`、`/batches`、`/corrections`。
 
 ## 目录
 
@@ -85,11 +96,12 @@ docker compose down -v             # 连数据库卷一起删
 app/
   main.py config.py errors.py reasons.py manifest.py store.py web.py bootstrap.py
   modules/m1_events/ … m7_export/        # 每模块 handler + service + 2 个规则文件
-  templates/                             # base + 6 页
+  modules/m8_correction/                 # 行级补正：rules + revision + service + handler
+  templates/                             # base + 7 页
   static/                                # theme / layout / components + 3 个 js
 docs/  DEPTH.md  DATA-DICTIONARY.md  RUNBOOK.md
 sample_data/  events_main.jsonl  events_v1_gb.csv  events_late.jsonl  events_clean.jsonl  schema_contract.json
-tests/  test_m1_events.py … test_m7_export.py  test_e2e.py  test_invariants.py  fixtures/
+tests/  test_m1_events.py … test_m8_correction.py  test_e2e.py  test_invariants.py  fixtures/
 ```
 
 ## 已知不覆盖
@@ -98,3 +110,5 @@ tests/  test_m1_events.py … test_m7_export.py  test_e2e.py  test_invariants.py
 - schema 演进只覆盖列改名与新增字段，不支持类型收窄；
 - 同一批次内不做跨批次键级合并（每个批次独立折叠，快照只反映当前批次）；
 - 事件级事务边界（同一事务的多个变更原子可见）未建模。
+- 行级补正只面向隔离区坏行（`quarantine`）：已采信行的修正需走更高版本的新事件，
+  冲突行（同版本两值、墓碑复活）需回源定版后再走正常采信，补正通道不受理。

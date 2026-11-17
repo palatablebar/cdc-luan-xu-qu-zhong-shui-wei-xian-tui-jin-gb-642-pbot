@@ -71,6 +71,56 @@ CREATE TABLE IF NOT EXISTS totals (
 CREATE TABLE IF NOT EXISTS manifests (
     batch_id TEXT PRIMARY KEY, json TEXT NOT NULL
 );
+-- M8 行级补正：三张新表只追加，原批次表（events/snapshots/manifests）永不改写。
+CREATE TABLE IF NOT EXISTS corrections (
+    correction_id TEXT PRIMARY KEY,
+    correction_key TEXT NOT NULL UNIQUE,
+    batch_id TEXT NOT NULL,
+    correction_no INTEGER NOT NULL,
+    target_ref TEXT NOT NULL,
+    status TEXT NOT NULL,
+    operator TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    event_json TEXT NOT NULL DEFAULT '{}',
+    payload_digest TEXT NOT NULL DEFAULT '',
+    reason_code TEXT,
+    detail TEXT NOT NULL DEFAULT '',
+    revision_no INTEGER,
+    supersedes_id TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_corr_batch ON corrections(batch_id, correction_no);
+CREATE INDEX IF NOT EXISTS idx_corr_target ON corrections(batch_id, target_ref, status);
+CREATE TABLE IF NOT EXISTS snapshot_revisions (
+    revision_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    revision_no INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    base_of_correction TEXT,
+    as_of_utc TEXT,
+    row_count INTEGER NOT NULL DEFAULT 0,
+    amount_snapshot TEXT NOT NULL DEFAULT '0.00',
+    created_at TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    UNIQUE(batch_id, revision_no)
+);
+CREATE INDEX IF NOT EXISTS idx_rev_batch ON snapshot_revisions(batch_id, revision_no);
+CREATE TABLE IF NOT EXISTS effective_snapshot_rows (
+    revision_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    table_name TEXT NOT NULL, pk TEXT NOT NULL,
+    version INTEGER NOT NULL, op TEXT NOT NULL, amount TEXT, qty INTEGER,
+    event_time_utc TEXT NOT NULL, row_ref TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    correction_id TEXT,
+    target_ref TEXT,
+    late INTEGER NOT NULL DEFAULT 0,
+    pending INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_eff_rev ON effective_snapshot_rows(revision_id);
+CREATE INDEX IF NOT EXISTS idx_eff_corr ON effective_snapshot_rows(correction_id);
 """
 
 
@@ -318,6 +368,195 @@ class Store:
             out[table] = self._all(
                 f"SELECT COUNT(*) AS n FROM {table} WHERE batch_id=?", (batch_id,))[0]["n"]
         return out
+
+    # ---------- M8 行级补正（append-only） ----------
+    def get_correction_by_key(self, batch_id: str, correction_key: str) -> dict | None:
+        rows = self._all(
+            "SELECT * FROM corrections WHERE batch_id=? AND correction_key=?",
+            (batch_id, correction_key))
+        return rows[0] if rows else None
+
+    def get_correction(self, correction_id: str) -> dict | None:
+        rows = self._all("SELECT * FROM corrections WHERE correction_id=?",
+                         (correction_id,))
+        return rows[0] if rows else None
+
+    def list_corrections(self, batch_id: str, limit: int = 200) -> list[dict]:
+        rows = self._all(
+            "SELECT * FROM corrections WHERE batch_id=? ORDER BY correction_no DESC LIMIT ?",
+            (batch_id, max(1, min(limit, 1000))))
+        for row in rows:
+            row["event"] = json.loads(row.pop("event_json") or "{}")
+        return rows
+
+    def next_correction_no(self, batch_id: str) -> int:
+        rows = self._all(
+            "SELECT COALESCE(MAX(correction_no), 0) AS n FROM corrections WHERE batch_id=?",
+            (batch_id,))
+        return int(rows[0]["n"]) + 1
+
+    def active_corrections(self, batch_id: str) -> list[dict]:
+        """当前生效的补正：applied 且未被同目标后续补正取代。"""
+        rows = self._all(
+            "SELECT * FROM corrections WHERE batch_id=? AND status='applied' "
+            "ORDER BY correction_no", (batch_id,))
+        latest_by_target: dict[str, dict] = {}
+        for row in rows:
+            latest_by_target[row["target_ref"]] = row
+        return sorted(latest_by_target.values(), key=lambda r: r["correction_no"])
+
+    def insert_correction(self, record: dict) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO corrections (correction_id,correction_key,batch_id,
+                        correction_no,target_ref,status,operator,reason,event_json,
+                        payload_digest,reason_code,detail,revision_no,supersedes_id,
+                        created_at,finished_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(correction_key) DO NOTHING""",
+                (record["correction_id"], record["correction_key"],
+                 record["batch_id"], record["correction_no"], record["target_ref"],
+                 record["status"], record.get("operator", ""), record.get("reason", ""),
+                 json.dumps(record.get("event", {}), ensure_ascii=False, default=str),
+                 record.get("payload_digest", ""), record.get("reason_code"),
+                 record.get("detail", ""), record.get("revision_no"),
+                 record.get("supersedes_id"), record["created_at"],
+                 record.get("finished_at")))
+
+    def mark_correction_applied(self, correction_id: str, revision_no: int,
+                                supersedes_id: str | None, finished_at: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE corrections SET status='applied', revision_no=?, "
+                "supersedes_id=?, finished_at=? WHERE correction_id=?",
+                (revision_no, supersedes_id, finished_at, correction_id))
+
+    def latest_revision(self, batch_id: str) -> dict | None:
+        rows = self._all(
+            "SELECT * FROM snapshot_revisions WHERE batch_id=? AND status='active' "
+            "ORDER BY revision_no DESC LIMIT 1", (batch_id,))
+        return rows[0] if rows else None
+
+    def get_revision(self, revision_id: str) -> dict | None:
+        rows = self._all("SELECT * FROM snapshot_revisions WHERE revision_id=?",
+                         (revision_id,))
+        return rows[0] if rows else None
+
+    def list_revisions(self, batch_id: str) -> list[dict]:
+        return self._all(
+            "SELECT * FROM snapshot_revisions WHERE batch_id=? ORDER BY revision_no",
+            (batch_id,))
+
+    def publish_revision(self, *, revision: dict, rows: list[dict]) -> None:
+        """整版发布：先写后切。失败由外层事务回滚，上一 active 版保持可用。"""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO snapshot_revisions (revision_id,batch_id,revision_no,status,
+                        base_of_correction,as_of_utc,row_count,amount_snapshot,
+                        created_at,note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(batch_id, revision_no) DO NOTHING""",
+                (revision["revision_id"], revision["batch_id"], revision["revision_no"],
+                 revision["status"], revision.get("base_of_correction"),
+                 revision.get("as_of_utc"), revision["row_count"],
+                 str(revision.get("amount_snapshot", "0.00")),
+                 revision["created_at"], revision.get("note", "")))
+            conn.execute("DELETE FROM effective_snapshot_rows WHERE revision_id=?",
+                         (revision["revision_id"],))
+            for row in rows:
+                conn.execute(
+                    """INSERT INTO effective_snapshot_rows (revision_id,batch_id,
+                            table_name,pk,version,op,amount,qty,event_time_utc,row_ref,
+                            source_kind,correction_id,target_ref,late,pending,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (revision["revision_id"], revision["batch_id"],
+                     row.get("table_name") or row.get("table"), row["pk"],
+                     row["version"], row["op"],
+                     None if row.get("amount") is None else str(row["amount"]),
+                     row.get("qty"),
+                     row.get("event_time_utc") or row.get("event_time"),
+                     row["row_ref"],
+                     row.get("source_kind", "original"), row.get("correction_id"),
+                     row.get("target_ref"), 1 if row.get("late") else 0,
+                     1 if row.get("pending") else 0,
+                     json.dumps(row.get("payload", {}), ensure_ascii=False,
+                                default=str)))
+
+    def load_effective_rows(self, revision_id: str) -> list[dict]:
+        rows = self._all(
+            "SELECT * FROM effective_snapshot_rows WHERE revision_id=? "
+            "ORDER BY table_name, pk", (revision_id,))
+        for row in rows:
+            row["payload"] = json.loads(row.pop("payload_json") or "{}")
+            row["amount"] = None if row["amount"] is None else Decimal(row["amount"])
+            row["late"] = bool(row["late"])
+            row["pending"] = bool(row["pending"])
+        return rows
+
+    def publish_correction_revision(self, *, record: dict, revision: dict,
+                                    rows: list[dict]) -> None:
+        """M8 单事务：补正单落库 + 修订版整版发布 + 回写 applied，失败整体回滚。"""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO corrections (correction_id,correction_key,batch_id,
+                        correction_no,target_ref,status,operator,reason,event_json,
+                        payload_digest,reason_code,detail,revision_no,supersedes_id,
+                        created_at,finished_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(correction_key) DO NOTHING""",
+                (record["correction_id"], record["correction_key"],
+                 record["batch_id"], record["correction_no"], record["target_ref"],
+                 record["status"], record.get("operator", ""), record.get("reason", ""),
+                 json.dumps(record.get("event", {}), ensure_ascii=False, default=str),
+                 record.get("payload_digest", ""), record.get("reason_code"),
+                 record.get("detail", ""), record.get("revision_no"),
+                 record.get("supersedes_id"), record["created_at"],
+                 record.get("finished_at")))
+            conn.execute(
+                """INSERT INTO snapshot_revisions (revision_id,batch_id,revision_no,
+                        status,base_of_correction,as_of_utc,row_count,amount_snapshot,
+                        created_at,note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(batch_id, revision_no) DO NOTHING""",
+                (revision["revision_id"], revision["batch_id"], revision["revision_no"],
+                 revision["status"], revision.get("base_of_correction"),
+                 revision.get("as_of_utc"), revision["row_count"],
+                 str(revision.get("amount_snapshot", "0.00")),
+                 revision["created_at"], revision.get("note", "")))
+            conn.execute("DELETE FROM effective_snapshot_rows WHERE revision_id=?",
+                         (revision["revision_id"],))
+            for row in rows:
+                conn.execute(
+                    """INSERT INTO effective_snapshot_rows (revision_id,batch_id,
+                            table_name,pk,version,op,amount,qty,event_time_utc,row_ref,
+                            source_kind,correction_id,target_ref,late,pending,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (revision["revision_id"], revision["batch_id"],
+                     row.get("table_name") or row.get("table"), row["pk"],
+                     row["version"], row["op"],
+                     None if row.get("amount") is None else str(row["amount"]),
+                     row.get("qty"),
+                     row.get("event_time_utc") or row.get("event_time"),
+                     row["row_ref"],
+                     row.get("source_kind", "original"), row.get("correction_id"),
+                     row.get("target_ref"), 1 if row.get("late") else 0,
+                     1 if row.get("pending") else 0,
+                     json.dumps(row.get("payload", {}), ensure_ascii=False,
+                                default=str)))
+
+    def find_effective_row_by_correction(self, batch_id: str,
+                                         correction_id: str) -> dict | None:
+        rows = self._all(
+            "SELECT r.* FROM effective_snapshot_rows r "
+            "JOIN snapshot_revisions v ON r.revision_id=v.revision_id "
+            "WHERE r.batch_id=? AND r.correction_id=? AND v.status='active' "
+            "LIMIT 1", (batch_id, correction_id))
+        if not rows:
+            return None
+        row = dict(rows[0])
+        row["payload"] = json.loads(row.pop("payload_json") or "{}")
+        row["amount"] = None if row["amount"] is None else Decimal(row["amount"])
+        return row
 
     def _all(self, sql: str, args: tuple) -> list[dict]:
         with self.connect() as conn:

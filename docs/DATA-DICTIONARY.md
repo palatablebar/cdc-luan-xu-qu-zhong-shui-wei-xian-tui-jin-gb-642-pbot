@@ -91,3 +91,39 @@
 `watermark_utc`、`max_event_time_utc`、`stages[]`、`counters`、`reconcile`。
 
 同一 `input_digest` 重跑命中同一 `batch_key`，返回原批次、不新增行。
+
+## 10 行级补正（M8，只追加）
+
+裁决：补正独立成单，**原批次六张表（含 events/snapshots/manifests）只读不改**；修正值由
+新的正式快照修订版承载。
+
+| 对象 | 标识 | 定义 |
+|---|---|---|
+| 补正单 | `correction_id = R-序号(4 位)` | 面向一个隔离 `row_ref` 的一次补正尝试，成功或失败都留痕 |
+| 补正键 | `correction_key` | `sha256(batch_id | target_ref | 规范化补正事件 | 操作人 | 事由)` 前 12 位；同键重发命中同一单 |
+| 修订版 | `revision_id = RV-{batch_id}-{序号(3 位)}` | 不可变正式快照；`revision_no` 从 1 递增，0 表示原批次基线 |
+| 补正事件行号 | `{target_ref}#correction:{correction_id}` | 正式快照里补正来源行的 `row_ref`，可反查补正单与原行 |
+
+准入（任一不过即写 `failed` 补正单并返回 409，不发布修订版）：
+
+1. `R_TARGET_NOT_FOUND`：目标 `row_ref` 必须在该批次证据中；
+2. `R_TARGET_NOT_QUARANTINE`：目标必须是隔离行——已采信/冲突/重复行不走补正通道；
+3. `R_CONTRACT_FAILED`：补正事件过 M2 同一套契约（金额 Decimal、时间 UTC、必填字段）；
+4. `R_IDENTITY_MISMATCH`：补正事件 `(table, pk, version)` 必须与目标坏行一致，不能换身份/跳版本；
+5. `R_DUPLICATE_BUSINESS_KEY`：与已采信事件同键同版本同签名的值无需补正。
+
+补正账（每次发布随修订版给出，任一不平显式标「不平」）：
+
+- 补正行账：生效补正单数 = 折叠进修订版的补正数（无遗漏、无重复计数）；
+- 快照键账：修订版快照键 = 活跃 + 墓碑；
+- 补正金额账：修订版快照金额 = 基线快照金额 + 逐键差额（Decimal 精确）。
+
+语义约定：补正**不推进水位**，`as_of` 沿用原批次 `watermark_utc`；晚于 `as_of` 的补正进
+待定窗口，早于水位的补正标迟到但仍应用。同目标二次补正取代旧单（`supersedes_id`），旧修订版
+原样保留可查。失败回滚后最新 `active` 修订版继续可用。
+
+追溯链（三向闭环）：
+
+- 正向 `GET /api/trace/row/{row_ref}`：原行证据 → 补正单链 → 各修订版正式值；
+- 反向 `GET /api/corrections/{id}`：补正单 → 目标原行证据 + 所在修订版正式值；
+- 正式快照每行带 `source_kind` / `correction_id` / `target_ref`，可点回前两者。

@@ -73,3 +73,41 @@ python -m pytest -q
 - `conflicts.csv`：3 行，含两条证据行引用；
 - `snapshot.csv` / `snapshot.json`：18 键，活跃 16、墓碑 2；
 - `manifest.json`：`run_id`、每个输入的 sha256、阶段耗时、四账。
+
+## 7 隔离坏行补正（当天用上修正值，原证据不动）
+
+原则：**不改原批次、不整批重跑**。补正独立成单，成功后正式快照切到新的不可变修订版。
+
+页面：`/corrections` → 在「可补正的隔离坏行」点「填入」→ 粘贴完整修正事件 → 提交。
+命令：
+
+```bash
+BASE=http://127.0.0.1:18201
+# 1) 提交补正（target_ref 必须是隔离行；事件身份 table/pk/version 须与坏行一致）
+curl -s -X POST $BASE/api/corrections -H 'content-type: application/json' -d '{
+  "target_ref": "events_main.jsonl:23",
+  "operator": "zhang.san",
+  "reason": "金额 abc 系导出端类型错误，回源确认为 88.00",
+  "event": {"table":"products","pk":"6001","version":1,"op":"upsert",
+            "event_time":"2026-11-15T08:31:00Z","schema":"v2",
+            "payload":{"status":"在售","amount":"88.00"}}
+}'
+# 2) 正式快照（默认最新有效修订版；?revision=1 可回看历史版）
+curl -s "$BASE/api/effective-snapshot" | python3 -m json.tool | head -40
+# 3) 正向追溯：原行证据 → 补正链 → 正式值
+curl -s "$BASE/api/trace/row/events_main.jsonl:23"
+# 4) 反向追溯：补正单 → 原行 + 修订版正式值
+curl -s "$BASE/api/corrections/R-0001"
+# 5) 导出补正单与正式快照
+curl -s -o /tmp/corrections.csv          "$BASE/api/export/corrections.csv"
+curl -s -o /tmp/effective-snapshot.csv   "$BASE/api/export/effective-snapshot.csv"
+```
+
+操作纪律：
+
+- **重试放心点**：同一内容重发命中同一 `correction_key`，返回原单，不新增修订版、不重复计数；
+- **失败不留半成品**：契约/身份不通过返回 409，写 `failed` 补正单留痕，正式快照仍是上一版；
+  按返回的原因码改内容后再提交（内容变了就是新单）；
+- **同目标二次补正**会取代旧单（`supersedes_id`），旧修订版仍可按 `revision` 回看；
+- 补正不推进水位，`as_of` 不变；晚于 `as_of` 的修正进待定窗口，早于水位标迟到但仍应用；
+- 已采信行、冲突行不在补正受理范围：前者走更高版本新事件，后者先回源定版再正常采信。
